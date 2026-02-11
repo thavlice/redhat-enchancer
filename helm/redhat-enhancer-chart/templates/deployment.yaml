@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "redhat-enhancer-chart.fullname" . }}
+  labels:
+    {{- include "redhat-enhancer-chart.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "redhat-enhancer-chart.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "redhat-enhancer-chart.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "redhat-enhancer-chart.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+
+          # --- ADDED ENV CONFIGURATION ---
+          env:
+            # Logging
+            - name: QUARKUS_LOG_LEVEL
+              value: {{ .Values.config.logLevel | quote }}
+
+            # App Specific Config
+            - name: SBOMER_ENHANCER_MAX_CONCURRENT
+              value: {{ .Values.config.maxConcurrent | quote }}
+            - name: SBOMER_ENHANCER_OOM_RETRIES
+              value: {{ .Values.config.oomRetries | quote }}
+
+            # Task Identity (Matches @ConfigProperty sbomer.redhat-image-enhancer.task-name)
+            # We use 'index' because the key 'redhat-image-enhancer' has dashes
+            - name: SBOMER_REDHAT_IMAGE_ENHANCER_TASK_NAME
+              value: {{ index .Values.task "redhat-image-enhancer" "name" | quote }}
+
+            # Service Account (Matches @ConfigProperty sbomer.service-account)
+            # This is critical for the TaskRunFactory to know which SA to assign to the Pod
+            - name: SBOMER_SERVICE_ACCOUNT
+              value: {{ include "redhat-enhancer-chart.serviceAccountName" . | quote }}
+
+            # Storage & Kafka
+            - name: SBOMER_STORAGE_URL
+              value: {{ .Values.config.storageUrl | quote }}
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: {{ .Values.config.kafka.bootstrapServers | quote }}
+            # Maps to ${SCHEMA_REGISTRY_URL} in your properties
+            - name: SCHEMA_REGISTRY_URL
+              value: {{ .Values.config.kafka.schemaRegistryUrl | quote }}
+
+            # Kubernetes Namespace Injection (Standard for Quarkus)
+            - name: QUARKUS_KUBERNETES_CLIENT_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: QUARKUS_OPERATOR_SDK_NAMESPACES
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+
+            # Optional: Cluster connection overrides (for local dev/external clusters)
+            {{- if .Values.config.quarkus.kubernetesClientMasterUrl }}
+            - name: QUARKUS_KUBERNETES_CLIENT_MASTER_URL
+              value: {{ .Values.config.quarkus.kubernetesClientMasterUrl | quote }}
+            {{- end }}
+
+            {{- if .Values.config.quarkus.trustCerts }}
+            - name: QUARKUS_KUBERNETES_CLIENT_TRUST_CERTS
+              value: {{ .Values.config.quarkus.trustCerts | quote }}
+            {{- end }}
+
+          # ----------------------------------
+
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.volumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.volumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

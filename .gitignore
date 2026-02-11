@@ -19,6 +19,32 @@
 *.tar.gz
 *.rar
 
+.idea/
+
+.DS_Store
+
+syft-generator.iml
+
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
 replay_pid*
+
+# temporarily need to fetch sbomer-contracts repo manually to include avro schema objects in the build
+sbomer-contracts/
+
+# Kafka local dev instance logs
+podman/kafka-data/
+
+# Ignore the local dev repo
+sbomer-local-dev/
+
+# Ignore the sbomer-platform helm chart
+sbomer-platform/
+
+# Ignore tmp for temporary files
+tmp/
+
+target/
+
+# local .env file
+.env
