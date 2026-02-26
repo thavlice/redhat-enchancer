@@ -87,7 +87,7 @@ helm upgrade --install redhat-enhancer "./helm/redhat-enhancer-chart" \
     --set image.pullPolicy=Never \
     --set config.kafka.bootstrapServers="sbomer-release-kafka:9092" \
     --set config.kafka.schemaRegistryUrl="http://sbomer-release-apicurio:8080/apis/registry/v2" \
-    --set config.storageUrl="http://sbomer-release-service:8085" \
+    --set config.storageUrl="http://sbomer-release-manifest-storage-service-chart:8080" \
     --set pnc.host="$PNC_HOST" \
     --set indy.host="$INDY_HOST" \
     --set koji.hub.url="$KOJI_HUB_URL" \

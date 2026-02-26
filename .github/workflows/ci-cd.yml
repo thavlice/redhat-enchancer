@@ -1,0 +1,159 @@
+name: SBOMer Red Hat Enhancer CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  REGISTRY: quay.io
+  REDHAT_ENHANCER_IMAGE: sbomer/redhat-enhancer
+  HELM_CHART: redhat-enhancer-chart
+  HELM_REPO: oci://quay.io/sbomer
+
+jobs:
+
+  build-redhat-enhancer:
+    name: Build Red Hat Enhancer
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      image: "${{ env.REGISTRY }}/${{ env.REDHAT_ENHANCER_IMAGE }}"
+      digest: ${{ steps.push.outputs.digest }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get short SHA
+        id: sha
+        run: echo "sha=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      # Schema logic (temporary)
+      - name: Clone Schema Repository
+        run: git clone https://github.com/sbomer-project/sbomer-contracts.git sbomer-contracts
+      - name: Install Schemas
+        run: mvn clean install
+        working-directory: sbomer-contracts
+
+      - name: Build Red Hat Enhancer
+        run: mvn clean package -Dquarkus.profile=prod
+
+      - name: Build Image
+        id: build
+        uses: redhat-actions/buildah-build@v2
+        with:
+          image: ${{ env.REDHAT_ENHANCER_IMAGE }}
+          tags: latest ${{ steps.sha.outputs.sha }}
+          containerfiles: |
+            ./src/main/docker/Dockerfile.jvm
+
+      - name: Push to Quay
+        id: push
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          image: ${{ steps.build.outputs.image }}
+          tags: ${{ steps.build.outputs.tags }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.8.1
+
+      - name: Login to Quay (Cosign)
+        run: echo "${{ secrets.QUAY_TOKEN }}" | cosign login quay.io --username "${{ secrets.QUAY_USERNAME }}" --password-stdin
+
+      - name: Sign the images with Cosign
+        run: |
+          IMAGE_URI="${{ env.REGISTRY }}/${{ env.REDHAT_ENHANCER_IMAGE }}@${{ steps.push.outputs.digest }}"
+          echo "Signing $IMAGE_URI"
+          cosign sign -y -a "repo=${{ github.repository }}" -a "workflow=${{ github.workflow }}" -a "sha=${{ github.sha }}" "$IMAGE_URI"
+
+  provenance:
+    needs: [build-redhat-enhancer]
+    permissions:
+      actions: read
+      id-token: write
+      packages: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
+    with:
+      image: ${{ needs.build-redhat-enhancer.outputs.image }}
+      digest: ${{ needs.build-redhat-enhancer.outputs.digest }}
+    secrets:
+      registry-username: ${{ secrets.QUAY_USERNAME }}
+      registry-password: ${{ secrets.QUAY_TOKEN }}
+
+  publish-chart:
+    name: Publish Helm Chart
+    runs-on: ubuntu-22.04
+    needs: [provenance]
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'latest'
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.8.1
+
+      - name: Get short SHA
+        id: sha
+        run: echo "sha=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Package Helm Chart
+        run: |
+          # Use Run Number for SemVer (0.1.x)
+          # Use Git SHA for AppVersion (matches the images we just built)
+          
+          helm package helm/${{ env.HELM_CHART }} \
+            --destination . \
+            --version "0.1.${{ github.run_number }}" \
+            --app-version "${{ steps.sha.outputs.sha }}"
+
+      - name: Login to Quay (Helm)
+        run: echo "${{ secrets.QUAY_TOKEN }}" | helm registry login quay.io --username "${{ secrets.QUAY_USERNAME }}" --password-stdin
+
+      - name: Push Chart
+        run: helm push ${{ env.HELM_CHART }}-*.tgz ${{ env.HELM_REPO }}
+
+      - name: Login to Quay (Cosign)
+        run: echo "${{ secrets.QUAY_TOKEN }}" | cosign login quay.io --username "${{ secrets.QUAY_USERNAME }}" --password-stdin
+
+      - name: Sign Helm Chart
+        run: |
+          # Define variables
+          CLEAN_REPO="${HELM_REPO#oci://}"
+          CHART_NAME="${{ env.HELM_CHART }}"
+          CHART_VERSION="0.1.${{ github.run_number }}"
+          FULL_IMAGE_REF="$CLEAN_REPO/$CHART_NAME:$CHART_VERSION"
+          
+          DIGEST=$(skopeo inspect docker://$FULL_IMAGE_REF | jq -r '.Digest')
+          echo "Found Digest: $DIGEST"
+
+          # Construct the URI using the Digest (@sha256:...) instead of the Tag (0.1.x)
+          CHART_URI_DIGEST="$CLEAN_REPO/$CHART_NAME@$DIGEST"
+          
+          echo "Signing $CHART_URI_DIGEST ..."
+          
+          cosign sign -y \
+            -a "repo=${{ github.repository }}" \
+            -a "workflow=${{ github.workflow }}" \
+            -a "sha=${{ github.sha }}" \
+            "$CHART_URI_DIGEST"
