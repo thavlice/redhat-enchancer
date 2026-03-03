@@ -96,19 +96,10 @@ spec:
         for public_url in "$@"; do
            filename=$(basename "$public_url")
 
-           # 1. Strip http://domain:port to get the raw path (e.g., /api/v1/storage/...)
-           # This regex handles http, https, and any domain/port combo
            url_path=$(echo "$public_url" | sed -E 's|^https?://[^/]+||')
-
-           # 2. Construct the internal URL
-           # Ensure we don't end up with double slashes if the param has a trailing slash
            internal_url="${INTERNAL_BASE%/}${url_path}"
 
            echo "Downloading $filename..."
-           echo "  - Original: $public_url"
-           echo "  - Internal: $internal_url"
-
-           # 3. Download from the INTERNAL URL
            http_code=$(curl -L -s -o "$filename" -w "%{http_code}" "$internal_url")
 
            if [[ "$http_code" -ne 200 ]]; then
@@ -117,14 +108,15 @@ spec:
              exit 1
            fi
 
+           # Upstream outputs: bom-linux-amd64.json
            if [[ "$filename" == *"bom-"* ]]; then
              clean="${filename#bom-}"
              clean="${clean%.json}"
-             folder_path=$(echo "$clean" | tr '-' '/')
+             folder_path=$(echo "$clean" | tr '-' '/') # Converts linux-amd64 to linux/amd64
 
              mkdir -p "$WORK_DIR/$folder_path"
              mv "$filename" "$WORK_DIR/$folder_path/bom.json"
-             echo "   Placed at $WORK_DIR/$folder_path/bom.json"
+             echo "   ✅ Placed at $WORK_DIR/$folder_path/bom.json"
            else
              echo "⚠️ Warning: Could not parse architecture from $filename. Placing in root."
              mv "$filename" "$WORK_DIR/bom.json"
@@ -195,6 +187,53 @@ spec:
              fi
         fi
 
+        echo "--- 4.5. Fetch Image Metadata (skopeo inspect) ---"
+
+        if ! command -v skopeo &> /dev/null; then
+            echo "❌ Error: 'skopeo' CLI is not installed in the agent image."
+            exit 1
+        fi
+
+        AUTH_ARGS=""
+        if [ -f "/tekton/creds/.docker/config.json" ]; then
+            AUTH_ARGS="--authfile=/tekton/creds/.docker/config.json"
+        fi
+
+        echo "Fetching top-level digest for $(params.image-ref)..."
+        skopeo inspect --no-tags docker://"$(params.image-ref)" $AUTH_ARGS > "$WORK_DIR/image.json"
+        IMAGE_DIGEST=$(jq -r '.Digest' "$WORK_DIR/image.json")
+
+        shopt -s nullglob
+        manifests=("$WORK_DIR"/*/*/bom.json)
+
+        if [ ${#manifests[@]} -eq 0 ]; then
+             echo "❌ Error: No manifests found in $WORK_DIR/*/*/bom.json to inspect."
+             exit 1
+        fi
+
+        for manifest in "${manifests[@]}"; do
+            dir_path=$(dirname "$manifest")
+
+            # Extract OS and Arch from the directory structure ($WORK_DIR/OS/ARCH/bom.json)
+            arch=$(basename "$dir_path")
+            os_dir=$(dirname "$dir_path")
+            os=$(basename "$os_dir")
+
+            echo "Fetching skopeo metadata for $(params.image-ref) (OS: $os, Arch: $arch)..."
+
+            # Use Tekton's injected Docker credentials if they exist
+            AUTH_ARGS=""
+            if [ -f "/tekton/creds/.docker/config.json" ]; then
+                AUTH_ARGS="--authfile=/tekton/creds/.docker/config.json"
+            fi
+
+            skopeo --override-os "$os" --override-arch "$arch" inspect --no-tags \
+                docker://"$(params.image-ref)" $AUTH_ARGS \
+                > "$dir_path/skopeo.json"
+
+            echo "  ✅ Saved $dir_path/skopeo.json"
+        done
+
         echo "--- 5. Adjust (Merge & Enrich) ---"
         # Fail if no files match
         shopt -s nullglob
@@ -212,7 +251,7 @@ spec:
 
         echo "--- 6. Catalog (Image Index) ---"
         mkdir -p "$WORK_DIR/catalog"
-        $JAVA_CMD -v sbom catalog --path "$WORK_DIR" --image-name "$(params.image-ref)" --output "$WORK_DIR/catalog/bom.json" image-index
+        $JAVA_CMD -v sbom catalog --path "$WORK_DIR" --image-name "$(params.image-ref)" --image-digest "$IMAGE_DIGEST" --output "$WORK_DIR/catalog/bom.json" image-index
 
         echo "--- 7. Process (Validation) ---"
         for manifest in "${manifests[@]}"; do
